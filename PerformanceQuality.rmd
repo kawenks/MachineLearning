@@ -1,0 +1,187 @@
+---
+title: "Machine Learning - Dumbell Execution Quality Classification"
+author: "Allan Cuenca"
+date: "Saturday, April 25, 2015"
+output: html_document
+---
+
+### Background
+
+This project a Human Activity Recognition excercise that aims to predict the performance quality of a dumbell exercise. The prediction will be based on a training set provided by [Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H.](http://groupware.les.inf.puc-rio.br/har#collaborators#ixzz3YSU0HWHl) from their Academic Paper entitled Qualitative Activity Recognition of Weight Lifting Excersises.  
+
+The project is a classification exercise as opposed to regression. The author's work leans towards interpretability vs. accuracy of the results in keeping with the intent to describe a human activity for the benefit of the human consumer.
+
+This project will user various techniques and models mostly using the Caret Package in R.  
+ 
+ __Limitations:__ The author has limited the models used to the Decision Tree and Random Tree models due to limited time to explore further the structure of the data and how a more appropriate model may be applied. Bagging and Boosting techniques where attempted but required more data cleansing and transformation which given the author's limited understanding of the data may significantly alter the data set.  
+ 
+ 
+ 
+### Load and Partition Data Sets
+```{r setup, message=FALSE, warning=FALSE}
+library(caret)
+library(RCurl)
+library(randomForest)
+library(dplyr)
+library(mlbench)
+
+set.seed(200)
+
+```
+
+
+```{r LoadData, cache=TRUE, message=FALSE, warning=FALSE}
+# load the data - cached
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",destfile="pml-training.csv",method="curl")
+
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",,destfile="pml-testing.csv",method="curl")
+
+tr_raw <- read.csv('pml-training.csv', stringsAsFactors=FALSE)
+test_set <- read.csv("pml-testing.csv", stringsAsFactors=FALSE)
+
+```
+
+
+#### Quick view of the data
+
+There are 160 variables covering 19,622 observations. 
+
+```{r QuickView}
+dim(tr_raw)
+str(tr_raw,list.len=22)
+
+```
+
+
+A not insignificant portion of the data is missing or blank. This will cause problems with models. Attempting a Principal Component Analysis will also yielded errors due to Zero variance fields. The following code cleans up the data.
+
+__Cleanup Criteria__  
+(1) Remove columns where NA's comprise at least 85% of the observations  
+(2) Remove columns where blanks comprise the same percentage of the observations.
+Note: 85% is arbitrary.  
+(3) Remove first 7 columns - these columns refer more to the observation metadata than to the actual performance.  
+(4) Remove columns that are constant or have near zero variance. These would not contribute to variability of the classification.  
+(5) Convert the outcome variable "classe" into a factor variable to accommodate model tuning requirements.
+
+```{r cleanup, cache=TRUE}
+rw = nrow(tr_raw)
+
+# criteria #1
+tr.clean_na <- tr_raw[,apply(tr_raw,2,function(c) sum(is.na(c))/0.85 < rw)]
+
+# criteria #2
+tr.clean_bl <- tr.clean_na[,apply(tr.clean_na,2,function(c) sum(c=="")/0.85 < rw)]
+
+# criteria #3
+tr.clean <- tr.clean_bl[,8:ncol(tr.clean_bl)]
+
+# criteria #4
+nzv <- nearZeroVar(tr.clean)
+nzv
+
+# criteria #5
+tr.clean$classe = as.factor(tr.clean$classe)
+
+rm(tr.clean_na)
+rm(tr.clean_bl)
+
+dim(tr.clean)
+```
+
+As it turns out, after removing the first 7 columns, all near zero variance fields have been eliminated.  
+
+### Preprocessing
+
+__Data Splitting__  
+
+Data will be split first between a training and test case. The training set is further sub-divided into a sub-sample and test-sample to be used for feature selection.   
+
+
+```{r data_splitting}
+train_ix <- createDataPartition(tr.clean$classe, p = 0.80, list=FALSE)
+tr_trnset <- tr.clean[train_ix,]
+tr_tstset <- tr.clean[-train_ix,]
+
+## tuning data
+trainIndex <- createDataPartition(tr_trnset$classe, p = 0.80, list=FALSE, times=1)
+tr.sub = tr_trnset[trainIndex,]
+tr.tst = tr_trnset[-trainIndex,]
+table(tr.sub$classe)
+```
+
+Perform Performance Tuning using the rpart package. Use the resulting model to calculate the important predictors.  
+
+```{r performance_tuning, cache=TRUE, warning=FALSE, message=FALSE}
+rpartmod <- rpart(classe~.,data=tr.sub)
+importance <- varImp(rpartmod,scale=FALSE)
+featureImp <- data.frame(colName=rownames(importance),importance)
+row.names(featureImp) <- NULL
+arrange(featureImp,desc(Overall))
+```
+
+Of the 52 predictors, 30 are indexed above zero in importance. So we will compare that to the results of a Principal Component Analysis on the original training set.
+
+
+```{r PCA, cache=TRUE}
+#tr.pca <- prcomp(tr.clean[,1:52], center=T, scale=T)
+tr.pca <- preProcess(tr.clean[,1:52], method="pca")
+#screeplot(tr.pca,type="line",main="Principal Component Analysis")
+tr.pca
+```
+
+The PCA considers 25 predictors as sufficient to capture 95% of the variance in the data set. I will disregard the PCA and take the top 30 predictors to train the final model. Again, this is to preserve interpretability vs. accuracy.   
+
+```{r featureset_selection, cache=TRUE}
+# take top 25
+featureset <- head(arrange(featureImp,desc(Overall)),30)
+
+# recompose training set based off of the remaining sample
+trainingset <- data.frame(classe=tr.tst[,c("classe")],tr.tst[,featureset$colName])
+```
+
+### Model Selection   
+
+After patiently waiting the results of Bagging and Boosting models, I'm convinced, either a Decision Tree or a Random Forest performs fast enough to give adequate predictions on the outcome. We then compare both results. Furthermore, this is an exercise in Classification (not Regression), so both models are appropriate.
+
+__Expected Error Rate__
+
+The target is 95% accurracy, So the error rate should be less than 5%. This is based on the PCA default threshold and assuming that 25 predictors are adequate to cover 95% of the variability of the data set.
+
+```{r decisiontree_model}
+library(rpart)
+dtmodel <- rpart(classe~., method="class", data=trainingset)
+dtpred <- predict(dtmodel,tr_tstset, type="class")
+confusionMatrix(dtpred,tr_tstset$classe)
+```
+
+```{r randomforest_model}
+RFmodel <- randomForest(classe ~ ., data=trainingset)
+
+rfpred <- predict(RFmodel,tr_tstset)
+confusionMatrix(rfpred,tr_tstset$classe)
+```
+
+
+### Model Performance Results
+
+Clearly the Random Forest model outperforms Decision Tree. As expected, the error rate is slightly about 5% with accuracy at 95%. I also tested using only the top 25 predictors and it was much worse at 90% accuracy.
+
+
+### Model Prediction against Test
+
+Answers to the Test using the model indicate some errors:
+
+ 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+ B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  A  B 
+
+2 of 20 were errors which is above the 5% expected. 
+
+
+### Conclusion
+
+The prevalence of missing data in the data set prevented a more thorough exploration of more accurate models. Nevertheless, at 95% accuracy, the Random Forest Models offers an adequate, fast and interpretable predictive model that can be applied in real-time to the benefit of the human consumer. 
+
+The feature reduction from 160 variables to 30 indicates a lot of noise from the data set. The feature set can be better tuned I believe using Bagging techniques but the noise factor needs to be minimized to decrease the resource requirements of the exercise (CPU, memory).
+
+
+
